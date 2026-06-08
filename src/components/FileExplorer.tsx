@@ -9,7 +9,6 @@ import {
 } from "react";
 import {
   browseArchive,
-  createEmptyFile,
   createFolder,
   deleteEntries,
   getUploadUrl,
@@ -73,7 +72,6 @@ export function FileExplorer({ token }: FileExplorerProps) {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
-  const foldersInputRef = useRef<HTMLInputElement>(null);
 
   const entries = toExplorerEntries(browse);
   const pathSegments = currentPath ? currentPath.split("/") : [];
@@ -207,22 +205,6 @@ export function FileExplorer({ token }: FileExplorerProps) {
     }
   };
 
-  const handleCreateFile = async () => {
-    const name = window.prompt("File name");
-    if (!name?.trim()) return;
-
-    setBusy(true);
-    setError(null);
-    try {
-      await createEmptyFile(token, joinPath(currentPath, name.trim()));
-      await loadBrowse();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create file");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const handleRename = async () => {
     if (!renameTarget || !renameValue.trim()) return;
 
@@ -322,15 +304,6 @@ export function FileExplorer({ token }: FileExplorerProps) {
           >
             New folder
           </button>
-          <button
-            className="btn btn-secondary btn-sm"
-            type="button"
-            onClick={() => void handleCreateFile()}
-            disabled={busy}
-            title="New file"
-          >
-            New file
-          </button>
           <span className="toolbar-divider" aria-hidden />
           <button
             className="btn btn-primary btn-sm"
@@ -347,15 +320,6 @@ export function FileExplorer({ token }: FileExplorerProps) {
             disabled={busy}
           >
             Upload folder
-          </button>
-          <button
-            className="btn btn-primary btn-sm"
-            type="button"
-            onClick={() => foldersInputRef.current?.click()}
-            disabled={busy}
-            title="Select multiple folders (Chrome/Edge)"
-          >
-            Upload folders
           </button>
         </div>
 
@@ -396,15 +360,6 @@ export function FileExplorer({ token }: FileExplorerProps) {
       />
       <input
         ref={folderInputRef}
-        className="hidden-input"
-        type="file"
-        multiple
-        // @ts-expect-error webkitdirectory is supported in Chromium browsers
-        webkitdirectory=""
-        onChange={onFolderSelected}
-      />
-      <input
-        ref={foldersInputRef}
         className="hidden-input"
         type="file"
         multiple

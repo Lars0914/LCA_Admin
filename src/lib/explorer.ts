@@ -93,7 +93,3 @@ export function filesFromInput(fileList: FileList): UploadableItem[] {
     relativePath: file.webkitRelativePath || file.name,
   }));
 }
-
-export function emptyFile(name: string): File {
-  return new File([], name, { type: "application/octet-stream" });
-}

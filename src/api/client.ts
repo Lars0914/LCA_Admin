@@ -134,17 +134,6 @@ export async function deleteEntries(
   }
 }
 
-export async function createEmptyFile(
-  token: string,
-  path: string,
-): Promise<void> {
-  const { uploadUrl } = await getUploadUrl(token, path, "application/octet-stream");
-  const empty = new File([], path.split("/").pop() ?? "file", {
-    type: "application/octet-stream",
-  });
-  await uploadFileWithProgress(uploadUrl, empty, () => {});
-}
-
 export async function getUploadUrl(
   token: string,
   path: string,
