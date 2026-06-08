@@ -125,6 +125,26 @@ export async function deleteEntry(
   });
 }
 
+export async function deleteEntries(
+  token: string,
+  paths: string[],
+): Promise<void> {
+  for (const path of paths) {
+    await deleteEntry(token, path);
+  }
+}
+
+export async function createEmptyFile(
+  token: string,
+  path: string,
+): Promise<void> {
+  const { uploadUrl } = await getUploadUrl(token, path, "application/octet-stream");
+  const empty = new File([], path.split("/").pop() ?? "file", {
+    type: "application/octet-stream",
+  });
+  await uploadFileWithProgress(uploadUrl, empty, () => {});
+}
+
 export async function getUploadUrl(
   token: string,
   path: string,
