@@ -34,7 +34,6 @@ export function AuthPage() {
     <div className="auth-page">
       <div className="auth-card">
         <h1>{APP_NAME}</h1>
-        <p>Sign in to manage Archive folders and files on Supabase.</p>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
