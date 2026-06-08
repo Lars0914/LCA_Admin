@@ -87,7 +87,7 @@ export async function browseArchive(
   token: string,
   path = "",
 ): Promise<BrowseResponse> {
-  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  const query = path ? `?folder=${encodeURIComponent(path)}` : "";
   return request(`/admin/archive/browse${query}`, { token });
 }
 
