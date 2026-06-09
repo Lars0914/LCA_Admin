@@ -19,7 +19,7 @@ export interface SignUpResponse {
   message: string;
 }
 
-export interface AdminUser {
+export interface MobileAppUser {
   id: number;
   mail: string;
   approvalStatus: ApprovalStatus;
@@ -81,15 +81,15 @@ async function request<T>(
   return data;
 }
 
-export async function signUp(mail: string, password: string): Promise<SignUpResponse> {
-  return request<SignUpResponse>("/auth/signup", {
+export async function signUp(mail: string, password: string): Promise<AuthResponse> {
+  return request<AuthResponse>("/admin/auth/signup", {
     method: "POST",
     body: JSON.stringify({ mail, password }),
   });
 }
 
 export async function signIn(mail: string, password: string): Promise<AuthResponse> {
-  return request<AuthResponse>("/auth/signin", {
+  return request<AuthResponse>("/admin/auth/signin", {
     method: "POST",
     body: JSON.stringify({ mail, password }),
   });
@@ -173,7 +173,7 @@ export async function notifyUploadComplete(token: string): Promise<void> {
 export async function listUsers(
   token: string,
   status: ApprovalStatus | "all" = "pending",
-): Promise<{ users: AdminUser[]; count: number }> {
+): Promise<{ users: MobileAppUser[]; count: number }> {
   const query = status === "all" ? "" : `?status=${encodeURIComponent(status)}`;
   return request(`/admin/users${query}`, { token });
 }
@@ -181,7 +181,7 @@ export async function listUsers(
 export async function approveUser(
   token: string,
   userId: number,
-): Promise<{ user: AdminUser; message: string }> {
+): Promise<{ user: MobileAppUser; message: string }> {
   return request("/admin/users/approve", {
     method: "POST",
     token,
@@ -192,7 +192,7 @@ export async function approveUser(
 export async function denyUser(
   token: string,
   userId: number,
-): Promise<{ user: AdminUser; message: string }> {
+): Promise<{ user: MobileAppUser; message: string }> {
   return request("/admin/users/deny", {
     method: "POST",
     token,

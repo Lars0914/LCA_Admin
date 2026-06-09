@@ -3,7 +3,7 @@ import {
   approveUser,
   denyUser,
   listUsers,
-  type AdminUser,
+  type MobileAppUser,
   type ApprovalStatus,
 } from "../api/client";
 
@@ -31,8 +31,8 @@ function statusLabel(status: ApprovalStatus): string {
 }
 
 export function UserManagement({ token }: Props) {
-  const [filter, setFilter] = useState<Filter>("pending");
-  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [users, setUsers] = useState<MobileAppUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -54,7 +54,7 @@ export function UserManagement({ token }: Props) {
     void loadUsers();
   }, [loadUsers]);
 
-  const handleApprove = async (user: AdminUser) => {
+  const handleApprove = async (user: MobileAppUser) => {
     setBusyId(user.id);
     setError(null);
     try {
@@ -67,7 +67,7 @@ export function UserManagement({ token }: Props) {
     }
   };
 
-  const handleDeny = async (user: AdminUser) => {
+  const handleDeny = async (user: MobileAppUser) => {
     const ok = window.confirm(`Deny access for ${user.mail}?`);
     if (!ok) return;
 

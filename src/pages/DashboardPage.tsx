@@ -37,7 +37,7 @@ export function DashboardPage() {
           className={`dashboard-tab${tab === "users" ? " dashboard-tab--active" : ""}`}
           onClick={() => setTab("users")}
         >
-          Users
+          App users
         </button>
       </nav>
 
