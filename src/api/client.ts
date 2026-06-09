@@ -10,6 +10,22 @@ export interface AuthResponse {
   token: string;
 }
 
+export type ApprovalStatus = "pending" | "approved" | "denied";
+
+export interface SignUpResponse {
+  user: AuthUser;
+  token?: string;
+  approvalStatus: ApprovalStatus;
+  message: string;
+}
+
+export interface AdminUser {
+  id: number;
+  mail: string;
+  approvalStatus: ApprovalStatus;
+  createdAt: string;
+}
+
 export interface AdminArchiveEntry {
   name: string;
   path: string;
@@ -65,8 +81,8 @@ async function request<T>(
   return data;
 }
 
-export async function signUp(mail: string, password: string): Promise<AuthResponse> {
-  return request<AuthResponse>("/auth/signup", {
+export async function signUp(mail: string, password: string): Promise<SignUpResponse> {
+  return request<SignUpResponse>("/auth/signup", {
     method: "POST",
     body: JSON.stringify({ mail, password }),
   });
@@ -151,6 +167,36 @@ export async function notifyUploadComplete(token: string): Promise<void> {
     method: "POST",
     token,
     body: JSON.stringify({}),
+  });
+}
+
+export async function listUsers(
+  token: string,
+  status: ApprovalStatus | "all" = "pending",
+): Promise<{ users: AdminUser[]; count: number }> {
+  const query = status === "all" ? "" : `?status=${encodeURIComponent(status)}`;
+  return request(`/admin/users${query}`, { token });
+}
+
+export async function approveUser(
+  token: string,
+  userId: number,
+): Promise<{ user: AdminUser; message: string }> {
+  return request("/admin/users/approve", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ userId }),
+  });
+}
+
+export async function denyUser(
+  token: string,
+  userId: number,
+): Promise<{ user: AdminUser; message: string }> {
+  return request("/admin/users/deny", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ userId }),
   });
 }
 
