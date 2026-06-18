@@ -4,6 +4,7 @@ import {
   KeyboardEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -23,9 +24,14 @@ import {
   formatDate,
   formatSize,
   joinPath,
+  pickFolderWithDirectoryPicker,
   readDataTransferItems,
+  supportsDirectoryPickerApi,
+  supportsMultiFolderPicker,
+  topLevelFolder,
   type UploadableItem,
 } from "../lib/explorer";
+import { runWithConcurrency, summarizeUploadQueue, UPLOAD_CONCURRENCY } from "../lib/upload";
 
 interface UploadProgress {
   id: string;
@@ -33,6 +39,7 @@ interface UploadProgress {
   percent: number;
   status: "uploading" | "done" | "error";
   error?: string;
+  folder: string;
 }
 
 type EntryKind = "folder" | "file";
@@ -58,6 +65,14 @@ function toExplorerEntries(browse: BrowseResponse | null): ExplorerEntry[] {
   return [...folders, ...files];
 }
 
+function displayFileName(relativePath: string, folder: string): string {
+  if (folder === "(files)") return relativePath;
+  const prefix = `${folder}/`;
+  return relativePath.startsWith(prefix)
+    ? relativePath.slice(prefix.length)
+    : relativePath;
+}
+
 export function FileExplorer({ token }: FileExplorerProps) {
   const [currentPath, setCurrentPath] = useState("");
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
@@ -67,6 +82,8 @@ export function FileExplorer({ token }: FileExplorerProps) {
   const [renameTarget, setRenameTarget] = useState<ExplorerEntry | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [uploads, setUploads] = useState<UploadProgress[]>([]);
+  const [uploadQueue, setUploadQueue] = useState<UploadableItem[]>([]);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
@@ -77,6 +94,13 @@ export function FileExplorer({ token }: FileExplorerProps) {
   const pathSegments = currentPath ? currentPath.split("/") : [];
   const selectedEntries = entries.filter((entry) => selected.has(entry.path));
   const allSelected = entries.length > 0 && selected.size === entries.length;
+  const multiFolderPicker = supportsMultiFolderPicker();
+  const directoryPickerApi = supportsDirectoryPickerApi();
+
+  const queueSummary = useMemo(
+    () => summarizeUploadQueue(uploadQueue),
+    [uploadQueue],
+  );
 
   const loadBrowse = useCallback(async () => {
     setLoading(true);
@@ -95,6 +119,88 @@ export function FileExplorer({ token }: FileExplorerProps) {
   useEffect(() => {
     void loadBrowse();
   }, [loadBrowse]);
+
+  const enqueueItems = useCallback((items: UploadableItem[]) => {
+    if (!items.length) return;
+    setUploadQueue((prev) => [...prev, ...items]);
+    setError(null);
+  }, []);
+
+  const clearQueue = () => setUploadQueue([]);
+
+  const uploadItems = async (items: UploadableItem[]) => {
+    if (!items.length) return;
+
+    const progressItems: UploadProgress[] = items.map((item, index) => ({
+      id: `${Date.now()}-${index}`,
+      name: item.relativePath,
+      percent: 0,
+      status: "uploading",
+      folder: topLevelFolder(item.relativePath),
+    }));
+    setUploads(progressItems);
+    setCollapsedFolders(new Set());
+    setBusy(true);
+    setError(null);
+
+    let successCount = 0;
+
+    await runWithConcurrency(items.length, UPLOAD_CONCURRENCY, async (i) => {
+      const { file, relativePath } = items[i];
+      const storagePath = currentPath
+        ? joinPath(currentPath, relativePath)
+        : relativePath;
+
+      try {
+        const { uploadUrl } = await getUploadUrl(
+          token,
+          storagePath,
+          file.type || undefined,
+        );
+
+        await uploadFileWithProgress(uploadUrl, file, (percent) => {
+          setUploads((prev) =>
+            prev.map((item, index) =>
+              index === i ? { ...item, percent, status: "uploading" } : item,
+            ),
+          );
+        });
+
+        successCount += 1;
+        setUploads((prev) =>
+          prev.map((item, index) =>
+            index === i ? { ...item, percent: 100, status: "done" } : item,
+          ),
+        );
+      } catch (err) {
+        setUploads((prev) =>
+          prev.map((item, index) =>
+            index === i
+              ? {
+                  ...item,
+                  status: "error",
+                  error: err instanceof Error ? err.message : "Upload failed",
+                }
+              : item,
+          ),
+        );
+      }
+    });
+
+    if (successCount > 0) {
+      await notifyUploadComplete(token);
+      await loadBrowse();
+    }
+
+    setBusy(false);
+  };
+
+  const flushQueue = () => {
+    if (!uploadQueue.length) return;
+    const batch = uploadQueue;
+    setUploadQueue([]);
+    void uploadItems(batch);
+  };
 
   const goToPath = (path: string) => {
     setCurrentPath(path);
@@ -130,63 +236,13 @@ export function FileExplorer({ token }: FileExplorerProps) {
     }
   };
 
-  const uploadItems = async (items: UploadableItem[]) => {
-    if (!items.length) return;
-
-    const progressItems: UploadProgress[] = items.map((item, index) => ({
-      id: `${Date.now()}-${index}`,
-      name: item.relativePath,
-      percent: 0,
-      status: "uploading",
-    }));
-    setUploads(progressItems);
-    setBusy(true);
-    setError(null);
-
-    for (let i = 0; i < items.length; i++) {
-      const { file, relativePath } = items[i];
-      const storagePath = currentPath
-        ? joinPath(currentPath, relativePath)
-        : relativePath;
-
-      try {
-        const { uploadUrl } = await getUploadUrl(
-          token,
-          storagePath,
-          file.type || undefined,
-        );
-
-        await uploadFileWithProgress(uploadUrl, file, (percent) => {
-          setUploads((prev) =>
-            prev.map((item, index) =>
-              index === i ? { ...item, percent, status: "uploading" } : item,
-            ),
-          );
-        });
-
-        setUploads((prev) =>
-          prev.map((item, index) =>
-            index === i ? { ...item, percent: 100, status: "done" } : item,
-          ),
-        );
-      } catch (err) {
-        setUploads((prev) =>
-          prev.map((item, index) =>
-            index === i
-              ? {
-                  ...item,
-                  status: "error",
-                  error: err instanceof Error ? err.message : "Upload failed",
-                }
-              : item,
-          ),
-        );
-      }
-    }
-
-    await notifyUploadComplete(token);
-    setBusy(false);
-    await loadBrowse();
+  const toggleFolderCollapsed = (folder: string) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folder)) next.delete(folder);
+      else next.add(folder);
+      return next;
+    });
   };
 
   const handleCreateFolder = async () => {
@@ -260,17 +316,37 @@ export function FileExplorer({ token }: FileExplorerProps) {
     event.target.value = "";
   };
 
-  const onFolderSelected = (event: ChangeEvent<HTMLInputElement>) => {
+  const onFoldersSelected = (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
-    if (files?.length) void uploadItems(filesFromInput(files));
+    if (files?.length) enqueueItems(filesFromInput(files));
     event.target.value = "";
+  };
+
+  const onAddFolderWithPicker = async () => {
+    if (directoryPickerApi) {
+      try {
+        const items = await pickFolderWithDirectoryPicker();
+        if (items.length) enqueueItems(items);
+        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
+        setError(
+          err instanceof Error ? err.message : "Could not read selected folder",
+        );
+        return;
+      }
+    }
+
+    folderInputRef.current?.click();
   };
 
   const onDrop = async (event: DragEvent) => {
     event.preventDefault();
     setDragOver(false);
     const items = await readDataTransferItems(event.dataTransfer.items);
-    if (items.length) void uploadItems(items);
+    if (items.length) enqueueItems(items);
   };
 
   const onDragOver = (event: DragEvent) => {
@@ -285,6 +361,19 @@ export function FileExplorer({ token }: FileExplorerProps) {
       if (entry.kind === "folder") openEntry(entry);
     }
   };
+
+  const groupedUploadProgress = useMemo(() => {
+    const groups = new Map<string, UploadProgress[]>();
+    for (const item of uploads) {
+      const list = groups.get(item.folder) ?? [];
+      list.push(item);
+      groups.set(item.folder, list);
+    }
+    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [uploads]);
+
+  const doneCount = uploads.filter((item) => item.status === "done").length;
+  const errorCount = uploads.filter((item) => item.status === "error").length;
 
   return (
     <section
@@ -316,10 +405,26 @@ export function FileExplorer({ token }: FileExplorerProps) {
           <button
             className="btn btn-primary btn-sm"
             type="button"
-            onClick={() => folderInputRef.current?.click()}
+            onClick={() => void onAddFolderWithPicker()}
             disabled={busy}
+            title={
+              multiFolderPicker
+                ? "Add one or more folders to the upload queue"
+                : "Add a folder to the upload queue"
+            }
           >
-            Upload folder
+            Add folders
+          </button>
+          <button
+            className="btn btn-secondary btn-sm"
+            type="button"
+            onClick={flushQueue}
+            disabled={busy || uploadQueue.length === 0}
+          >
+            Upload all
+            {uploadQueue.length > 0
+              ? ` (${queueSummary.fileCount})`
+              : ""}
           </button>
         </div>
 
@@ -363,10 +468,51 @@ export function FileExplorer({ token }: FileExplorerProps) {
         className="hidden-input"
         type="file"
         multiple
-        // @ts-expect-error webkitdirectory is supported in Chromium browsers
+        // @ts-expect-error directory picker attributes for Chromium / Firefox
         webkitdirectory=""
-        onChange={onFolderSelected}
+        directory=""
+        mozdirectory=""
+        onChange={onFoldersSelected}
       />
+
+      {uploadQueue.length > 0 ? (
+        <div className="upload-queue-banner">
+          <div className="upload-queue-copy">
+            <strong>Upload queue</strong>
+            <span>
+              {queueSummary.folderCount} folder
+              {queueSummary.folderCount === 1 ? "" : "s"}, {queueSummary.fileCount}{" "}
+              file{queueSummary.fileCount === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="upload-queue-actions">
+            <button
+              className="btn btn-primary btn-sm"
+              type="button"
+              onClick={() => void onAddFolderWithPicker()}
+              disabled={busy}
+            >
+              Add more folders
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              type="button"
+              onClick={flushQueue}
+              disabled={busy}
+            >
+              Upload all
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              type="button"
+              onClick={clearQueue}
+              disabled={busy}
+            >
+              Clear queue
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="explorer-address">
         <button
@@ -443,8 +589,8 @@ export function FileExplorer({ token }: FileExplorerProps) {
             ) : entries.length === 0 ? (
               <tr>
                 <td colSpan={5} className="explorer-empty">
-                  This folder is empty. Create items, upload files/folders, or
-                  drag and drop here.
+                  This folder is empty. Add folders to the queue, upload files,
+                  or drag and drop multiple folders here.
                 </td>
               </tr>
             ) : (
@@ -496,44 +642,83 @@ export function FileExplorer({ token }: FileExplorerProps) {
       </div>
 
       {dragOver ? (
-        <div className="explorer-drop-hint">Drop files or folders to upload</div>
+        <div className="explorer-drop-hint">
+          Drop folders or files to add them to the upload queue
+        </div>
       ) : null}
 
       {uploads.length > 0 ? (
         <div className="upload-panel">
           <div className="upload-panel-header">
-            <h3>Upload progress</h3>
+            <h3>
+              Upload progress
+              {uploads.length > 0 ? (
+                <span className="upload-panel-summary">
+                  {doneCount}/{uploads.length} done
+                  {errorCount > 0 ? ` · ${errorCount} failed` : ""}
+                </span>
+              ) : null}
+            </h3>
             <button
               type="button"
               className="btn btn-secondary btn-sm"
               onClick={() => setUploads([])}
+              disabled={busy}
             >
               Clear
             </button>
           </div>
           <div className="progress-list">
-            {uploads.map((item) => (
-              <div key={item.id} className="progress-item">
-                <div className="progress-label">
-                  <span>{item.name}</span>
-                  <span>
-                    {item.status === "error"
-                      ? item.error ?? "Failed"
-                      : `${item.percent}%`}
-                  </span>
+            {groupedUploadProgress.map(([folder, items]) => {
+              const folderDone = items.filter((item) => item.status === "done").length;
+              const folderErrors = items.filter((item) => item.status === "error").length;
+              const collapsed = collapsedFolders.has(folder);
+              return (
+                <div key={folder} className="progress-folder-group">
+                  <button
+                    type="button"
+                    className="progress-folder-header"
+                    onClick={() => toggleFolderCollapsed(folder)}
+                  >
+                    <span className="progress-folder-title">
+                      {collapsed ? "▶" : "▼"} {folder}
+                    </span>
+                    <span className="progress-folder-meta">
+                      {folderDone}/{items.length}
+                      {folderErrors > 0 ? ` · ${folderErrors} failed` : ""}
+                    </span>
+                  </button>
+                  {!collapsed ? (
+                    <div className="progress-folder-files">
+                      {items.map((item) => (
+                        <div key={item.id} className="progress-item">
+                          <div className="progress-label">
+                            <span>{displayFileName(item.name, folder)}</span>
+                            <span>
+                              {item.status === "error"
+                                ? item.error ?? "Failed"
+                                : `${item.percent}%`}
+                            </span>
+                          </div>
+                          <div className="progress-bar">
+                            <div
+                              className="progress-fill"
+                              style={{
+                                width: `${item.status === "error" ? 0 : item.percent}%`,
+                                background:
+                                  item.status === "error"
+                                    ? "var(--danger)"
+                                    : undefined,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
-                <div className="progress-bar">
-                  <div
-                    className="progress-fill"
-                    style={{
-                      width: `${item.status === "error" ? 0 : item.percent}%`,
-                      background:
-                        item.status === "error" ? "var(--danger)" : undefined,
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ) : null}

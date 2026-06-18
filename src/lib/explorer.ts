@@ -19,6 +19,49 @@ export interface UploadableItem {
   relativePath: string;
 }
 
+export interface FolderUploadGroup {
+  name: string;
+  files: UploadableItem[];
+}
+
+export function normalizeRelativePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+/** First path segment — used to group multi-folder uploads in the progress UI. */
+export function topLevelFolder(relativePath: string): string {
+  const normalized = normalizeRelativePath(relativePath);
+  const slash = normalized.indexOf("/");
+  return slash === -1 ? "(files)" : normalized.slice(0, slash);
+}
+
+export function groupItemsByTopLevelFolder(
+  items: UploadableItem[],
+): FolderUploadGroup[] {
+  const map = new Map<string, UploadableItem[]>();
+
+  for (const item of items) {
+    const folder = topLevelFolder(item.relativePath);
+    const list = map.get(folder) ?? [];
+    list.push(item);
+    map.set(folder, list);
+  }
+
+  return Array.from(map.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, files]) => ({ name, files }));
+}
+
+export function supportsMultiFolderPicker(): boolean {
+  if (typeof document === "undefined") return false;
+  const input = document.createElement("input");
+  return "webkitdirectory" in input;
+}
+
+export function supportsDirectoryPickerApi(): boolean {
+  return typeof window !== "undefined" && "showDirectoryPicker" in window;
+}
+
 function readDirectoryEntries(
   directory: FileSystemDirectoryEntry,
 ): Promise<FileSystemEntry[]> {
@@ -51,7 +94,9 @@ async function readEntry(
     const file = await new Promise<File>((resolve, reject) => {
       (entry as FileSystemFileEntry).file(resolve, reject);
     });
-    const relativePath = prefix ? `${prefix}/${file.name}` : file.name;
+    const relativePath = normalizeRelativePath(
+      prefix ? `${prefix}/${file.name}` : file.name,
+    );
     return [{ file, relativePath }];
   }
 
@@ -66,6 +111,34 @@ async function readEntry(
   }
 
   return [];
+}
+
+async function readDirectoryHandle(
+  handle: FileSystemDirectoryHandle,
+  prefix: string,
+): Promise<UploadableItem[]> {
+  const items: UploadableItem[] = [];
+
+  for await (const entry of handle.values()) {
+    if (entry.kind === "file") {
+      const file = await entry.getFile();
+      const relativePath = normalizeRelativePath(
+        prefix ? `${prefix}/${file.name}` : file.name,
+      );
+      items.push({ file, relativePath });
+      continue;
+    }
+
+    const nestedPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
+    items.push(
+      ...(await readDirectoryHandle(
+        entry as FileSystemDirectoryHandle,
+        nestedPrefix,
+      )),
+    );
+  }
+
+  return items;
 }
 
 export async function readDataTransferItems(
@@ -90,6 +163,16 @@ export async function readDataTransferItems(
 export function filesFromInput(fileList: FileList): UploadableItem[] {
   return Array.from(fileList).map((file) => ({
     file,
-    relativePath: file.webkitRelativePath || file.name,
+    relativePath: normalizeRelativePath(file.webkitRelativePath || file.name),
   }));
+}
+
+/** Pick one folder via the File System Access API (Safari / modern Chromium). */
+export async function pickFolderWithDirectoryPicker(): Promise<UploadableItem[]> {
+  if (!supportsDirectoryPickerApi()) {
+    return [];
+  }
+
+  const handle = await window.showDirectoryPicker({ mode: "read" });
+  return readDirectoryHandle(handle, handle.name);
 }
