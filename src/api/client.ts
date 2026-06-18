@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "../config";
+import { retryWithBackoff, UPLOAD_MAX_ATTEMPTS } from "../lib/upload";
 
 export interface AuthUser {
   id: number;
@@ -228,6 +229,32 @@ export function uploadFileWithProgress(
     xhr.onerror = () => reject(new ApiError("Upload failed", 0));
     xhr.send(file);
   });
+}
+
+/** Request a fresh signed URL and upload; retries transient failures with backoff. */
+export async function uploadArchiveFileWithRetry(
+  token: string,
+  storagePath: string,
+  file: File,
+  onProgress: (percent: number) => void,
+  onRetry?: (nextAttempt: number, maxAttempts: number) => void,
+): Promise<void> {
+  await retryWithBackoff(
+    async (attempt) => {
+      if (attempt > 1) {
+        onProgress(0);
+        onRetry?.(attempt, UPLOAD_MAX_ATTEMPTS);
+      }
+
+      const { uploadUrl } = await getUploadUrl(
+        token,
+        storagePath,
+        file.type || undefined,
+      );
+      await uploadFileWithProgress(uploadUrl, file, onProgress);
+    },
+    { maxAttempts: UPLOAD_MAX_ATTEMPTS },
+  );
 }
 
 export { ApiError };

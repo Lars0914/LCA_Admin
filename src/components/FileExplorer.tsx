@@ -12,13 +12,17 @@ import {
   browseArchive,
   createFolder,
   deleteEntries,
-  getUploadUrl,
   notifyUploadComplete,
   renameEntry,
-  uploadFileWithProgress,
+  uploadArchiveFileWithRetry,
   type AdminArchiveEntry,
   type BrowseResponse,
 } from "../api/client";
+import {
+  isMobileUploadDevice,
+  MOBILE_FILE_ACCEPT,
+  supportsFolderUploadOnDevice,
+} from "../lib/device";
 import {
   filesFromInput,
   formatDate,
@@ -31,7 +35,7 @@ import {
   topLevelFolder,
   type UploadableItem,
 } from "../lib/explorer";
-import { runWithConcurrency, summarizeUploadQueue, UPLOAD_CONCURRENCY } from "../lib/upload";
+import { getUploadConcurrency, runWithConcurrency, summarizeUploadQueue } from "../lib/upload";
 
 interface UploadProgress {
   id: string;
@@ -88,7 +92,12 @@ export function FileExplorer({ token }: FileExplorerProps) {
   const [dragOver, setDragOver] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mobileFileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  const [isMobile, setIsMobile] = useState(isMobileUploadDevice);
+  const folderUploadSupported = supportsFolderUploadOnDevice();
 
   const entries = toExplorerEntries(browse);
   const pathSegments = currentPath ? currentPath.split("/") : [];
@@ -96,6 +105,13 @@ export function FileExplorer({ token }: FileExplorerProps) {
   const allSelected = entries.length > 0 && selected.size === entries.length;
   const multiFolderPicker = supportsMultiFolderPicker();
   const directoryPickerApi = supportsDirectoryPickerApi();
+
+  useEffect(() => {
+    const update = () => setIsMobile(isMobileUploadDevice());
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
 
   const queueSummary = useMemo(
     () => summarizeUploadQueue(uploadQueue),
@@ -145,26 +161,44 @@ export function FileExplorer({ token }: FileExplorerProps) {
 
     let successCount = 0;
 
-    await runWithConcurrency(items.length, UPLOAD_CONCURRENCY, async (i) => {
+    await runWithConcurrency(
+      items.length,
+      getUploadConcurrency(isMobile),
+      async (i) => {
       const { file, relativePath } = items[i];
       const storagePath = currentPath
         ? joinPath(currentPath, relativePath)
         : relativePath;
 
       try {
-        const { uploadUrl } = await getUploadUrl(
+        await uploadArchiveFileWithRetry(
           token,
           storagePath,
-          file.type || undefined,
+          file,
+          (percent) => {
+            setUploads((prev) =>
+              prev.map((item, index) =>
+                index === i
+                  ? { ...item, percent, status: "uploading", error: undefined }
+                  : item,
+              ),
+            );
+          },
+          (nextAttempt, maxAttempts) => {
+            setUploads((prev) =>
+              prev.map((item, index) =>
+                index === i
+                  ? {
+                      ...item,
+                      percent: 0,
+                      status: "uploading",
+                      error: `Retrying (${nextAttempt}/${maxAttempts})…`,
+                    }
+                  : item,
+              ),
+            );
+          },
         );
-
-        await uploadFileWithProgress(uploadUrl, file, (percent) => {
-          setUploads((prev) =>
-            prev.map((item, index) =>
-              index === i ? { ...item, percent, status: "uploading" } : item,
-            ),
-          );
-        });
 
         successCount += 1;
         setUploads((prev) =>
@@ -312,7 +346,20 @@ export function FileExplorer({ token }: FileExplorerProps) {
 
   const onFilesSelected = (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
-    if (files?.length) void uploadItems(filesFromInput(files));
+    if (!files?.length) return;
+
+    const items = filesFromInput(files);
+    if (isMobile) {
+      enqueueItems(items);
+    } else {
+      void uploadItems(items);
+    }
+    event.target.value = "";
+  };
+
+  const onCameraSelected = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files?.length) enqueueItems(filesFromInput(files));
     event.target.value = "";
   };
 
@@ -377,11 +424,22 @@ export function FileExplorer({ token }: FileExplorerProps) {
 
   return (
     <section
-      className={`explorer${dragOver ? " explorer--drag-over" : ""}`}
-      onDrop={(e) => void onDrop(e)}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
+      className={`explorer${dragOver ? " explorer--drag-over" : ""}${isMobile ? " explorer--mobile" : ""}`}
+      onDrop={isMobile ? undefined : (e) => void onDrop(e)}
+      onDragOver={isMobile ? undefined : onDragOver}
+      onDragLeave={isMobile ? undefined : onDragLeave}
     >
+      {isMobile ? (
+        <div className="mobile-upload-hint">
+          <strong>Mobile upload</strong>
+          <span>
+            Tap <em>Add photos/files</em> and select multiple images from your
+            gallery. Add more batches, then tap <em>Upload all</em>. Folder
+            upload requires a desktop browser.
+          </span>
+        </div>
+      ) : null}
+
       <div className="explorer-toolbar">
         <div className="explorer-toolbar-group">
           <button
@@ -394,27 +452,52 @@ export function FileExplorer({ token }: FileExplorerProps) {
             New folder
           </button>
           <span className="toolbar-divider" aria-hidden />
-          <button
-            className="btn btn-primary btn-sm"
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={busy}
-          >
-            Upload files
-          </button>
-          <button
-            className="btn btn-primary btn-sm"
-            type="button"
-            onClick={() => void onAddFolderWithPicker()}
-            disabled={busy}
-            title={
-              multiFolderPicker
-                ? "Add one or more folders to the upload queue"
-                : "Add a folder to the upload queue"
-            }
-          >
-            Add folders
-          </button>
+          {isMobile ? (
+            <>
+              <button
+                className="btn btn-primary btn-sm"
+                type="button"
+                onClick={() => mobileFileInputRef.current?.click()}
+                disabled={busy}
+              >
+                Add photos/files
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                type="button"
+                onClick={() => cameraInputRef.current?.click()}
+                disabled={busy}
+              >
+                Camera
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                className="btn btn-primary btn-sm"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={busy}
+              >
+                Upload files
+              </button>
+              {folderUploadSupported ? (
+                <button
+                  className="btn btn-primary btn-sm"
+                  type="button"
+                  onClick={() => void onAddFolderWithPicker()}
+                  disabled={busy}
+                  title={
+                    multiFolderPicker
+                      ? "Add one or more folders to the upload queue"
+                      : "Add a folder to the upload queue"
+                  }
+                >
+                  Add folders
+                </button>
+              ) : null}
+            </>
+          )}
           <button
             className="btn btn-secondary btn-sm"
             type="button"
@@ -464,6 +547,22 @@ export function FileExplorer({ token }: FileExplorerProps) {
         onChange={onFilesSelected}
       />
       <input
+        ref={mobileFileInputRef}
+        className="hidden-input"
+        type="file"
+        multiple
+        accept={MOBILE_FILE_ACCEPT}
+        onChange={onFilesSelected}
+      />
+      <input
+        ref={cameraInputRef}
+        className="hidden-input"
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={onCameraSelected}
+      />
+      <input
         ref={folderInputRef}
         className="hidden-input"
         type="file"
@@ -480,20 +579,31 @@ export function FileExplorer({ token }: FileExplorerProps) {
           <div className="upload-queue-copy">
             <strong>Upload queue</strong>
             <span>
-              {queueSummary.folderCount} folder
-              {queueSummary.folderCount === 1 ? "" : "s"}, {queueSummary.fileCount}{" "}
-              file{queueSummary.fileCount === 1 ? "" : "s"}
+              {isMobile
+                ? `${queueSummary.fileCount} file${queueSummary.fileCount === 1 ? "" : "s"} selected`
+                : `${queueSummary.folderCount} folder${queueSummary.folderCount === 1 ? "" : "s"}, ${queueSummary.fileCount} file${queueSummary.fileCount === 1 ? "" : "s"}`}
             </span>
           </div>
           <div className="upload-queue-actions">
-            <button
-              className="btn btn-primary btn-sm"
-              type="button"
-              onClick={() => void onAddFolderWithPicker()}
-              disabled={busy}
-            >
-              Add more folders
-            </button>
+            {isMobile ? (
+              <button
+                className="btn btn-primary btn-sm"
+                type="button"
+                onClick={() => mobileFileInputRef.current?.click()}
+                disabled={busy}
+              >
+                Add more photos/files
+              </button>
+            ) : (
+              <button
+                className="btn btn-primary btn-sm"
+                type="button"
+                onClick={() => void onAddFolderWithPicker()}
+                disabled={busy}
+              >
+                Add more folders
+              </button>
+            )}
             <button
               className="btn btn-secondary btn-sm"
               type="button"
@@ -589,8 +699,9 @@ export function FileExplorer({ token }: FileExplorerProps) {
             ) : entries.length === 0 ? (
               <tr>
                 <td colSpan={5} className="explorer-empty">
-                  This folder is empty. Add folders to the queue, upload files,
-                  or drag and drop multiple folders here.
+                  {isMobile
+                    ? "This folder is empty. Tap Add photos/files to select images from your gallery, then Upload all."
+                    : "This folder is empty. Add folders to the queue, upload files, or drag and drop multiple folders here."}
                 </td>
               </tr>
             ) : (
@@ -641,9 +752,26 @@ export function FileExplorer({ token }: FileExplorerProps) {
         </table>
       </div>
 
-      {dragOver ? (
+      {dragOver && !isMobile ? (
         <div className="explorer-drop-hint">
           Drop folders or files to add them to the upload queue
+        </div>
+      ) : null}
+
+      {isMobile && uploadQueue.length > 0 ? (
+        <div className="mobile-upload-bar">
+          <span>
+            {queueSummary.fileCount} file
+            {queueSummary.fileCount === 1 ? "" : "s"} ready
+          </span>
+          <button
+            className="btn btn-primary btn-sm"
+            type="button"
+            onClick={flushQueue}
+            disabled={busy}
+          >
+            Upload all
+          </button>
         </div>
       ) : null}
 
@@ -697,7 +825,7 @@ export function FileExplorer({ token }: FileExplorerProps) {
                             <span>
                               {item.status === "error"
                                 ? item.error ?? "Failed"
-                                : `${item.percent}%`}
+                                : item.error ?? `${item.percent}%`}
                             </span>
                           </div>
                           <div className="progress-bar">
